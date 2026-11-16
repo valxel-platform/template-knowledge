@@ -1,0 +1,52 @@
+# What this product's agents may search, where it comes from, and who may see it (config.py has
+# the full reference). Coder agents write this from the product's data model during the build, and
+# people approve it with the code at G5. The example is an EMR: notes and messages arrive as
+# events, clinic documents are read from their store, and scanned forms are named but not indexed.
+index:
+  # Decided at the architecture gate (G4): a provider under the BAA through the gateway, or the
+  # product's self-hosted model. Changing it means `knowledge-admin rebuild`.
+  embedding_model: text-embedding-3-small
+  dimensions: 1536
+  chunking: { max_chars: 1200, version: 1 }
+
+sources:
+  - name: notes
+    title: Clinical notes
+    from: { events: { topic: emr.notes.v1 } }
+    id: note_id
+    text: [body]
+    heading: title
+    date: signed_at
+    record_type: note
+    link: "https://emr.example/notes/{note_id}"
+    tenant: clinic_id
+    allow: ["team:{care_team}", "user:{author}"]
+    exclude: [patient_phone, patient_ssn]
+
+  - name: messages
+    title: Care-team messages
+    from: { events: { topic: emr.messages.v1 } }
+    id: message_id
+    text: [body]
+    heading: subject
+    date: sent_at
+    record_type: message
+    tenant: clinic_id
+    allow: ["team:{care_team}"]
+
+  - name: policies
+    title: Clinic policies and protocols
+    # An existing document store that keeps text and publishes no events: read every 15 minutes.
+    from: { scan: { dsn_env: KNOWLEDGE_DOCS_DSN, query: "select id, title, body, updated_at, clinic_id from clinic_documents where format = 'text'", every_minutes: 15 } }
+    id: id
+    text: [body]
+    heading: title
+    date: updated_at
+    record_type: policy
+    tenant: clinic_id
+
+  - name: scanned-forms
+    title: Scanned referral forms
+    # Files only (PDFs and scans): not indexed in this version. list_sources names them, so an
+    # agent says it can't search them rather than answer as if they don't exist.
+    from: { files: { store: "s3://emr-documents/referrals/" } }

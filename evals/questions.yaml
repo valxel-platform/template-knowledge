@@ -1,0 +1,40 @@
+# The golden set: questions this product's agents must be able to answer from the index, who asks
+# them, and what they must never see. Agents draft it from the data model during the build and a
+# person approves it with the code at G5; later changes need the same approval.
+#
+# Bars are starting values: a product tightens them, never loosens. The zero bars (no leaks, no
+# deleted records) are platform rules: any failure fails the suite whatever the recall.
+bars:
+  recall_at_8: 0.85      # share of questions whose expected passages are all in the top 8
+  p95_ms: 800            # search latency at the 95th percentile (on dev, against the real gateway)
+
+as:
+  cardio-nurse: { tenants: [north-clinic], principals: ["user:n-17", "team:cardio", "role:nurse"] }
+  ortho-doctor: { tenants: [north-clinic], principals: ["user:d-4", "team:ortho", "role:doctor"] }
+  south-cardio: { tenants: [south-clinic], principals: ["user:d-9", "team:cardio", "role:doctor"] }
+
+recall:
+  - { ask: cardio-nurse, question: "How was the warfarin dose changed for the atrial fibrillation patient?", expect: ["notes:n-1001"] }
+  - { ask: cardio-nurse, question: "What was the INR after the warfarin dose change?", expect: ["messages:m-201"] }
+  - { ask: cardio-nurse, question: "How often should INR be checked after a dose change?", expect: ["policies:pol-1"] }
+  - { ask: cardio-nurse, question: "When should a nurse call the doctor about a high INR?", expect: ["policies:pol-1"] }
+  - { ask: cardio-nurse, question: "What diuretic dose helped the ankle swelling?", expect: ["notes:n-1002"] }
+  - { ask: cardio-nurse, question: "What tests were ordered for exertional chest pain?", expect: ["notes:n-1006"] }
+  - { ask: cardio-nurse, question: "How long will the pacemaker battery last?", expect: ["notes:n-1008"] }
+  - { ask: cardio-nurse, question: "amlodipine increase blood pressure", expect: ["notes:n-1010"] }
+  - { ask: ortho-doctor, question: "What is the knee flexion six weeks after replacement?", expect: ["notes:n-1003"] }
+  - { ask: ortho-doctor, question: "When is the wrist X-ray recheck?", expect: ["notes:n-1004"] }
+  - { ask: ortho-doctor, question: "When can patients stop using a walking aid after knee surgery?", expect: ["policies:pol-2"] }
+  - { ask: south-cardio, question: "Which anticoagulant was started instead of warfarin?", expect: ["notes:n-1005"] }
+  - { ask: south-cardio, question: "How quickly are refill requests answered?", expect: ["policies:pol-3"] }
+
+# Asked as someone who must not see the answer: none of these records may come back.
+leaks:
+  - { ask: ortho-doctor, question: "warfarin dose atrial fibrillation INR", forbid: ["notes:n-1001", "messages:m-201", "notes:n-1009"] }
+  - { ask: south-cardio, question: "warfarin dose reduced INR 3.6", forbid: ["notes:n-1001", "messages:m-201", "policies:pol-1"] }
+  - { ask: cardio-nurse, question: "apixaban started instead of warfarin", forbid: ["notes:n-1005", "messages:m-203"] }
+  - { ask: cardio-nurse, question: "HbA1c metformin empagliflozin", forbid: ["notes:n-1007"] }
+
+# Deleted in the product after indexing: never answered again.
+deletions:
+  - { delete: "notes:n-1009", ask: cardio-nurse, question: "Why was bisoprolol stopped?" }

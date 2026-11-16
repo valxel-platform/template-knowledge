@@ -1,0 +1,163 @@
+# Required checks on the default branch: unit, retrieval (and CodeQL, from default setup).
+# Job names are the check names the Valxel SDLC and the branch ruleset look for; keep them.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: write
+    # The store's tests run against Postgres with pgvector, as a login that may create roles, so
+    # they prove the row-level security the tools rely on.
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      KNOWLEDGE_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the base branch, for coverage of new code
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -m 'not evals'
+      - name: Report results
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/report.py --context "unit / report" --junit reports/junit.xml --cobertura coverage.xml
+      # The lines this pull request changes that no test runs (diff-cover), posted as the
+      # code-quality / new code status the quality gate reads. The status is the gate, not this job.
+      - name: Coverage on new code
+        if: github.event_name == 'pull_request' && !cancelled()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          pipx run diff-cover==11.0.2 coverage.xml --compare-branch="origin/$BASE_REF" \
+            --format json:new-code.json
+          python3 .github/scripts/report.py --context "code-quality / new code" --new-code new-code.json
+
+  # The golden set (evals/questions.yaml) against Postgres: recall of the expected passages, no
+  # passage for someone who must not see it, no deleted record, and latency. Leaks, deletions and
+  # latency must all pass; recall must reach the bar in questions.yaml.
+  retrieval:
+    name: retrieval
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      statuses: write
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run the retrieval evals
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          uv run python -c "from knowledge.pgstore import migrate; import os; migrate(os.environ['DATABASE_URL'])"
+          uv run python -m evals.run --database-url "$DATABASE_URL" --junit reports/retrieval.xml
+      - name: Report results
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bar=$(uv run python -c "import yaml; print(yaml.safe_load(open('evals/questions.yaml'))['bars']['recall_at_8'])")
+          python3 .github/scripts/report.py --context "retrieval / report" --junit reports/retrieval.xml \
+            --min-pass-rate "$bar" --must-pass 'leak:*' --must-pass 'deleted:*' --must-pass 'latency*'
+
+  dependency-review:
+    name: dependency-review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # OpenChoreo builds and ships the image; this proves it builds, starts and has no known
+      # high or critical vulnerabilities with a fix available, on every PR.
+      - run: docker build --pull -t ci .
+      - name: Start the image
+        run: |
+          docker run -d --name smoke -p 8080:8080 \
+            -e KNOWLEDGE_OIDC_ISSUER=https://id.example.com/realms/ci \
+            -e KNOWLEDGE_OIDC_JWKS_URL=https://id.example.com/realms/ci/certs ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then exit 0; fi
+            sleep 1
+          done
+          docker logs smoke
+          exit 1
+      # Syft and Grype run as containers (pinned versions), not as marketplace actions.
+      - name: Software bill of materials
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.57.1 \
+            docker:ci -o cyclonedx-json > sbom.cyclonedx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
+          retention-days: 30
+      - name: Scan for vulnerabilities with a fix
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/grype:v0.121.3 \
+            docker:ci --only-fixed --fail-on high
+
