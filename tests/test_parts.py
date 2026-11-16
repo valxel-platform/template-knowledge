@@ -13,7 +13,16 @@ import pytest
 from knowledge import admin
 from knowledge.app import make_models, seed
 from knowledge.config import ConfigError, load, parse
-from knowledge.ingest import EventsRunner, Ingestor, ScanRunner, Worker, lag_seconds, state_key
+from knowledge.ingest import (
+    EventsRunner,
+    Ingestor,
+    ScanRunner,
+    Worker,
+    check_topics,
+    lag_seconds,
+    not_compacted,
+    state_key,
+)
 from knowledge.models import GatewayEmbedder, GatewayReranker, HashEmbedder, ModelUnavailable
 from knowledge.passages import Filters, Passage, Viewer, from_record, redact_card_numbers, split
 from knowledge.retriever import NoIndex, Retriever
@@ -42,7 +51,14 @@ def seeded() -> tuple[MemoryStore, Any]:
 # ---------------------------------------------------------------------- knowledge.yaml
 BASE = {
     "index": {"embedding_model": "m", "dimensions": 64},
-    "sources": [{"name": "notes", "from": {"events": {"topic": "t"}}, "text": ["body"], "tenant": "clinic"}],
+    "sources": [
+        {
+            "name": "notes",
+            "from": {"events": {"topic": "t", "compacted": True}},
+            "text": ["body"],
+            "tenant": "clinic",
+        }
+    ],
 }
 
 
@@ -56,7 +72,12 @@ BASE = {
         (
             {
                 "sources": [
-                    {"name": "Bad Name", "from": {"events": {"topic": "t"}}, "text": ["b"], "tenant": "c"}
+                    {
+                        "name": "Bad Name",
+                        "from": {"events": {"topic": "t", "compacted": True}},
+                        "text": ["b"],
+                        "tenant": "c",
+                    }
                 ]
             },
             "lowercase",
@@ -68,16 +89,27 @@ BASE = {
             "dsn_env and query",
         ),
         (
-            {"sources": [{"name": "a1", "from": {"events": {"topic": "t"}}, "tenant": "c"}]},
+            {
+                "sources": [
+                    {"name": "a1", "from": {"events": {"topic": "t", "compacted": True}}, "tenant": "c"}
+                ]
+            },
             "whose text is indexed",
         ),
-        ({"sources": [{"name": "a1", "from": {"events": {"topic": "t"}}, "text": ["b"]}]}, "tenant field"),
+        (
+            {
+                "sources": [
+                    {"name": "a1", "from": {"events": {"topic": "t", "compacted": True}}, "text": ["b"]}
+                ]
+            },
+            "tenant field",
+        ),
         (
             {
                 "sources": [
                     {
                         "name": "a1",
-                        "from": {"events": {"topic": "t"}},
+                        "from": {"events": {"topic": "t", "compacted": True}},
                         "text": ["b"],
                         "tenant": "c",
                         "exclude": ["b"],
@@ -91,7 +123,7 @@ BASE = {
                 "sources": [
                     {
                         "name": "a1",
-                        "from": {"events": {"topic": "t"}},
+                        "from": {"events": {"topic": "t", "compacted": True}},
                         "text": ["b"],
                         "tenant": "c",
                         "allow": ["x"],
@@ -101,6 +133,10 @@ BASE = {
             "start with user:",
         ),
         ({"sources": [BASE["sources"][0], BASE["sources"][0]]}, "two sources are named notes"),
+        (
+            {"sources": [{"name": "a1", "from": {"events": {"topic": "t"}}, "text": ["b"], "tenant": "c"}]},
+            "set compacted: true once its events carry whole records",
+        ),
     ],
 )
 def test_knowledge_yaml_says_what_is_wrong(change: dict[str, Any], problem: str) -> None:
@@ -124,7 +160,12 @@ def test_the_example_config_reads() -> None:
     custom = parse(
         {
             **BASE,
-            "sources": [{**BASE["sources"][0], "from": {"events": {"topic": "t", "delete_types": ["gone"]}}}],
+            "sources": [
+                {
+                    **BASE["sources"][0],
+                    "from": {"events": {"topic": "t", "compacted": True, "delete_types": ["gone"]}},
+                }
+            ],
         }
     )
     assert custom.sources[0].is_delete("gone") and not custom.sources[0].is_delete("x.deleted")
@@ -576,3 +617,31 @@ def test_a_source_far_behind_is_logged_for_the_alert_rule(caplog: pytest.LogCapt
         assert w.report_lag(now=1.0 + 2 * 3600 + 601) == ["notes"]
     assert "knowledge.source_behind notes is 120 minutes behind" in caplog.text
     assert Worker(Ingestor(CFG, MemoryStore(), embedder_for), name="kn", kafka={}).report_lag() == []
+
+
+def test_a_topic_that_isnt_compacted_is_reported_and_blocks_a_rebuild(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, _ = seeded()
+    policies = {"emr.notes.v1": "compact", "emr.messages.v1": "delete"}
+
+    def describe(topic: str) -> str:
+        return policies[topic]
+
+    with caplog.at_level("WARNING", logger="knowledge.ingest"):
+        assert check_topics(CFG, store, describe) == ["messages"]
+    assert "knowledge.topic_not_compacted messages reads emr.messages.v1" in caplog.text
+    assert not_compacted(CFG, store) == ["messages"]
+    monkeypatch.setenv("KNOWLEDGE_CONFIG_PATH", CONFIG)
+    out = io.StringIO()
+    assert admin.main(["rebuild"], store=store, out=out) == 1
+    assert "Not rebuilding: the topics of messages aren't compacted" in out.getvalue()
+    assert admin.main(["rebuild", "--force"], store=store, out=io.StringIO()) == 0
+    # Fixed: the next check clears it. A topic that can't be described is left as it was.
+    policies["emr.messages.v1"] = "compact,delete"
+    assert check_topics(CFG, store, describe) == [] and not_compacted(CFG, store) == []
+
+    def down(topic: str) -> str:
+        raise RuntimeError("broker down")
+
+    assert check_topics(CFG, store, down) == []

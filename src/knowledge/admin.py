@@ -17,7 +17,7 @@ import time
 from typing import TextIO
 
 from .config import load
-from .ingest import lag_seconds
+from .ingest import lag_seconds, not_compacted
 from .settings import Settings
 from .store import Store
 
@@ -27,7 +27,8 @@ def main(argv: list[str] | None = None, *, store: Store | None = None, out: Text
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("migrate")
     sub.add_parser("status")
-    sub.add_parser("rebuild")
+    r = sub.add_parser("rebuild")
+    r.add_argument("--force", action="store_true")
     a = sub.add_parser("activate")
     a.add_argument("version", type=int)
     a.add_argument("--force", action="store_true")
@@ -54,6 +55,14 @@ def main(argv: list[str] | None = None, *, store: Store | None = None, out: Text
                 write(f"  {name}: " + ("not ingested yet" if lag is None else f"{lag:.0f}s behind") + "\n")
         return 0
     if args.cmd == "rebuild":
+        stale = not_compacted(cfg, st)
+        if stale and not args.force:
+            write(
+                f"Not rebuilding: the topics of {', '.join(stale)} aren't compacted, so a replay would miss "
+                "records older than their retention. Compact them, or make those sources scans; "
+                "--force rebuilds anyway.\n"
+            )
+            return 1
         v = st.create_version(cfg.index.embedding_model, cfg.index.dimensions, cfg.index.chunking.version)
         write(
             f"Version {v.version} is building: the ingestion worker fills it from every source. "

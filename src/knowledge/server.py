@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .audit import Auditor, make_sink
 from .config import Config
-from .ingest import LAG_ALERT_S, lag_seconds
+from .ingest import LAG_ALERT_S, lag_seconds, not_compacted
 from .models import ModelUnavailable
 from .passages import Filters, Viewer
 from .retriever import NoIndex, Retriever
@@ -265,9 +265,12 @@ def build_server(
         who = viewer()
         version, lag = lags()
         counts = retriever.store.counts(version, who) if version is not None else {}
+        stale = set(not_compacted(cfg, retriever.store))
         out = []
         for s in cfg.sources:
             note = "Files, not indexed: they can't be searched." if not s.indexed else ""
+            if s.name in stale:
+                note = "Its topic isn't compacted: rebuilding the index would miss older records."
             if s.indexed and (lg := lag.get(s.name)) is not None and lg > LAG_ALERT_S:
                 note = f"{round(lg / 60)} minutes behind the product."
             out.append(

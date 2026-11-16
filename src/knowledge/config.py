@@ -7,7 +7,7 @@
     sources:
       - name: notes                     # the source's name; source ids are <name>:<record id>
         title: Clinical notes
-        from: { events: { topic: emr.notes.v1 } }        # or { scan: {...} }, or { files: {...} }
+        from: { events: { topic: emr.notes.v1, compacted: true } }   # or { scan: {...} }, or { files: {...} }
         id: note_id                     # the record's id field
         text: [body]                    # fields whose text is indexed, in order
         heading: title                  # the passage title (optional)
@@ -20,7 +20,11 @@
 
 Source kinds:
   events   a Kafka topic of CloudEvents; `delete_types` (default: types ending in .deleted) remove
-           the record, every other type replaces it.
+           the record, every other type replaces it. A rebuild replays the topic from its start, so
+           the topic must keep every record: `compacted: true` says it does (each event carries the
+           whole record, keyed by its id, and Kafka keeps each record's latest event). The worker
+           checks the topic, and `knowledge-admin rebuild` refuses while a topic isn't compacted.
+           A topic that can't be compacted should be a scan instead.
   scan     a query against a read-only database (`dsn_env` names the variable holding its URL),
            run every `every_minutes`: new and changed rows are indexed, rows gone are deleted.
            For a document store that keeps text but publishes no events.
@@ -136,6 +140,13 @@ def parse(raw: dict[str, Any], *, data_class: str = "general", multi_tenant: boo
         opts = dict(frm[kind] or {})
         if kind == "events" and not opts.get("topic"):
             problems.append(f"{name}: events need a topic")
+        if kind == "events" and not opts.get("compacted"):
+            topic = opts.get("topic") or "the topic"
+            problems.append(
+                f"{name}: a rebuild replays {topic} from its start; set compacted: "
+                "true once its events carry whole records keyed by id (and the topic is compacted), or "
+                "make the source a scan"
+            )
         if kind == "scan":
             if not (opts.get("dsn_env") and opts.get("query")):
                 problems.append(f"{name}: a scan needs dsn_env and query")
