@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse, Response
 
 from . import cohorts, errors, events, flags, telemetry, usage
 from .config import Config, load
+from .contracts import Contracts
 from .ingest import Ingestor, Worker, lag_seconds
 from .models import Embedder, GatewayEmbedder, GatewayReranker, HashEmbedder, Reranker
 from .retriever import Retriever
@@ -150,7 +151,13 @@ def create_app(
 
     if settings.ingest:
         writer = make_store(settings, settings.ingest_database_url) if settings.ingest_database_url else store
-        ingestor = Ingestor(cfg, writer, embedder_for, payments=settings.data_class == "payments")
+        ingestor = Ingestor(
+            cfg,
+            writer,
+            embedder_for,
+            payments=settings.data_class == "payments",
+            contracts=Contracts.load(settings.contracts_dir),
+        )
         kafka = {"bootstrap.servers": settings.ingest_kafka_bootstrap, **settings.ingest_kafka_config}
         Worker(ingestor, name=settings.name, kafka=kafka).start()
 

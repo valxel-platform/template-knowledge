@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     ingest: bool = False
     ingest_kafka_bootstrap: str = ""
     ingest_kafka_config: dict[str, str] = {}  # security.protocol, sasl.*: as for the audit topic
+    # The schemas of the topics read (contracts/, written by the SDLC tool from the approved data
+    # contracts and shipped in the image): events are checked against them before they're indexed.
+    contracts_dir: str = "contracts"
     # Audit trail (audit.py): "kafka" in deployed environments, "log" locally.
     product: str = ""  # e.g. emr
     environment: str = ""  # e.g. production
