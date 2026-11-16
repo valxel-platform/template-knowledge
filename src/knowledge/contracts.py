@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,11 +34,34 @@ EVENTS = Counter(
 )
 
 
+SUMMARY = "valxel.datasets"
+_counts: dict[str, dict[str, int]] = {}
+_counts_lock = threading.Lock()
+
+
+def count(dataset: str, outcome: str) -> None:
+    """One event of a dataset: the meter, and the summary line's count."""
+    EVENTS.labels(dataset, outcome).inc()
+    with _counts_lock:
+        by = _counts.setdefault(dataset, {})
+        by[outcome] = by.get(outcome, 0) + 1
+
+
+def summary_line() -> str | None:
+    """valxel.datasets {"<dataset>":{"<outcome>":n}} for what was counted since the last line, or
+    None. The worker logs it once a minute; in staging the SDLC tool sums these per component and
+    compares what each producer published with what each consumer applied, skipped or parked."""
+    with _counts_lock:
+        taken = {d: dict(sorted(o.items())) for d, o in sorted(_counts.items()) if o}
+        _counts.clear()
+    return f"{SUMMARY} {json.dumps(taken, separators=(',', ':'))}" if taken else None
+
+
 class ContractError(ValueError):
     """An event's data breaks its contract. The message names the field, never its value."""
 
     def __init__(self, dataset: str, field: str, rule: str) -> None:
-        super().__init__(f"{dataset}: {field or '(data)'} fails {rule}")
+        super().__init__(f"{dataset}: {field or '(data)'} breaks the data contract ({rule})")
         self.dataset, self.field, self.rule = dataset, field, rule
 
 
