@@ -73,6 +73,15 @@ At start, the worker reads each topic's `cleanup.policy`. A topic that isn't com
 `knowledge-admin rebuild` refuses until it's fixed (or `--force`). A source that can't meet this
 should be a scan.
 
+**Data contracts.** Every events source's topic has an approved data contract (ODCS v3, in the
+product's governance repo). The SDLC tool writes the schemas this repo reads into `contracts/`
+(`<dataset>.json` and `lock.yaml`), and they ship in the image. The worker drops properties its
+copy doesn't know (a newer, compatible producer), validates the rest, and parks an event that fails
+on `<topic>.dlt`, with the field and rule in its headers and never the value. It counts every event
+by dataset and outcome (`knowledge_dataset_events_total{outcome="applied|parked|skipped"}`) for the
+platform's reconciliation. Kafka allows only consumer groups that start with the component's name,
+so `name` in `knowledge.yaml` is the component's name.
+
 ## Evals
 
 `evals/questions.yaml` is the golden set:

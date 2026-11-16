@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import Config, Source
+from .contracts import EVENTS, ContractError, Contracts
 from .models import Embedder
 from .passages import from_record
 from .store import IndexVersion, Store, live_versions
@@ -65,6 +66,7 @@ class Ingestor:
         *,
         payments: bool = False,
         clock: Callable[[], float] = time.time,
+        contracts: Contracts | None = None,
     ) -> None:
         self.cfg, self.store, self.embedder_for, self.payments, self.clock = (
             cfg,
@@ -73,6 +75,8 @@ class Ingestor:
             payments,
             clock,
         )
+        # The approved data contracts of the topics read (contracts/, written by the SDLC tool).
+        self.contracts = contracts or Contracts({})
 
     def upsert(self, source: Source, record: dict[str, Any], version: IndexVersion) -> None:
         kept = {k: v for k, v in record.items() if k not in source.exclude}
@@ -104,7 +108,8 @@ class Ingestor:
                 raise ValueError(f"{source.name}: a deletion without the record's id")
             self.delete(source, rid, version)
         else:
-            self.upsert(source, data, version)
+            contract = self.contracts.for_topic(str(source.options.get("topic") or ""))
+            self.upsert(source, contract.check(data) if contract else data, version)
         self.store.set_source_state(
             state_key(source.name, version.version),
             kind="events",
@@ -217,12 +222,17 @@ class EventsRunner(threading.Thread):
         group: str,
         consumer_factory: Callable[[dict[str, Any]], Any],
         kafka: dict[str, Any],
+        producer_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         super().__init__(daemon=True, name=f"ingest-{source.name}-v{version.version}")
         self.ingestor, self.source, self.version = ingestor, source, version
         self.consumer = consumer_factory(
             {**kafka, "group.id": group, "enable.auto.commit": False, "auto.offset.reset": "earliest"}
         )
+        self.kafka, self.producer_factory = kafka, producer_factory or _kafka_producer
+        self.producer: Any = None
+        self.topic = str(source.options.get("topic") or "")
+        self.dataset = ingestor.contracts.dataset(self.topic)
         self.stop = threading.Event()
         self.last_lag_check = 0.0
 
@@ -241,7 +251,11 @@ class EventsRunner(threading.Thread):
             try:
                 event = json.loads(msg.value())
                 self.ingestor.handle_event(self.source, event, self.version)
+                EVENTS.labels(self.dataset, "applied").inc()
+            except ContractError as exc:  # breaks its contract: park it, naming the field, never its value
+                self.park(msg, exc)
             except (ValueError, KeyError, TypeError) as exc:  # a record that can't be read: skip it
+                EVENTS.labels(self.dataset, "skipped").inc()
                 log.error(
                     "%s: skipped an unreadable event at offset %s (%s)",
                     self.source.name,
@@ -263,6 +277,31 @@ class EventsRunner(threading.Thread):
             self.ingestor.store.set_source_state(
                 state_key(self.source.name, self.version.version), kind="events", behind=self.behind()
             )
+
+    def park(self, msg: Any, exc: ContractError) -> None:
+        """The event as it came, on <topic>.dlt, with why in its headers."""
+        if self.producer is None:
+            self.producer = self.producer_factory(self.kafka)
+        self.producer.produce(
+            f"{self.topic}.dlt",
+            key=msg.key(),
+            value=msg.value(),
+            headers=[
+                ("valxel-dataset", exc.dataset.encode()),
+                ("valxel-field", exc.field.encode()),
+                ("valxel-rule", exc.rule.encode()),
+                ("valxel-offset", str(msg.offset()).encode()),
+            ],
+        )
+        self.producer.flush(10)
+        EVENTS.labels(self.dataset, "parked").inc()
+        log.error(
+            "knowledge.event_parked dataset=%s field=%s rule=%s offset=%s",
+            exc.dataset,
+            exc.field,
+            exc.rule,
+            msg.offset(),
+        )
 
     def behind(self) -> int:
         total = 0
@@ -331,10 +370,12 @@ class Worker:
         name: str,
         kafka: dict[str, Any],
         consumer_factory: Callable[[dict[str, Any]], Any] | None = None,
+        producer_factory: Callable[[dict[str, Any]], Any] | None = None,
         rows: Callable[[Source], Iterable[dict[str, Any]]] = scan_rows,
     ) -> None:
         self.ingestor, self.name, self.kafka, self.rows = ingestor, name, kafka, rows
         self.consumer_factory = consumer_factory or _kafka_consumer
+        self.producer_factory = producer_factory
         self.describe: Callable[[str], str] = lambda topic: _cleanup_policy(kafka, topic)
         self.runners: dict[tuple[str, int], EventsRunner | ScanRunner] = {}
         self.stop = threading.Event()
@@ -377,6 +418,7 @@ class Worker:
                         group=f"{self.name}.{s.name}.v{v.version}",
                         consumer_factory=self.consumer_factory,
                         kafka=self.kafka,
+                        producer_factory=self.producer_factory,
                     )
                 else:
                     runner = ScanRunner(self.ingestor, s, v, rows=self.rows)
@@ -409,6 +451,12 @@ def _cleanup_policy(kafka: dict[str, Any], topic: str) -> str:
     res = ConfigResource(ConfigResource.Type.TOPIC, topic)
     configs = admin.describe_configs([res])[res].result(timeout=15)
     return str(configs["cleanup.policy"].value)
+
+
+def _kafka_producer(conf: dict[str, Any]) -> Any:
+    from confluent_kafka import Producer
+
+    return Producer({**conf, "enable.idempotence": True, "acks": "all"})
 
 
 def _kafka_consumer(conf: dict[str, Any]) -> Any:

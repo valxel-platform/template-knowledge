@@ -786,6 +786,7 @@ source = { editable = "." }
 dependencies = [
     { name = "confluent-kafka" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "openfeature-provider-ofrep" },
     { name = "openfeature-sdk" },
@@ -817,6 +818,7 @@ dev = [
 requires-dist = [
     { name = "confluent-kafka", specifier = ">=2.16,<3" },
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "jsonschema", specifier = ">=4.20,<5" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "openfeature-provider-ofrep", specifier = ">=0.3,<1" },
     { name = "openfeature-sdk", specifier = ">=0.10,<1" },
