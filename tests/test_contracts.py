@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from knowledge.contracts import EVENTS, ContractError, Contracts
+from knowledge.contracts import EVENTS, ContractError, Contracts, summary_line
 from knowledge.ingest import EventsRunner, Ingestor, Worker
 
 from .test_parts import CFG, NORTH_CARDIO, FakeConsumer, Msg, embedder_for, seeded
@@ -59,6 +59,7 @@ def test_data_is_pruned_to_the_contract_and_then_validated(contracts: Contracts)
         c.check({"note_id": "n-1", "clinic_id": "c", "kind": "memo-with-a-secret"})
     assert (e.value.field, e.value.rule) == ("kind", "enum")
     assert "memo-with-a-secret" not in str(e.value)  # the field, never its value
+    assert str(e.value) == "emr.notes: kind breaks the data contract (enum)"
 
 
 class Producer:
@@ -78,6 +79,7 @@ class KeyedMsg(Msg):
 
 
 def test_an_event_that_breaks_its_contract_is_parked_and_counted(contracts: Contracts) -> None:
+    summary_line()  # start from a clean count
     store, v = seeded()
     ing = Ingestor(CFG, store, embedder_for, contracts=contracts)
     good = {
@@ -114,6 +116,8 @@ def test_an_event_that_breaks_its_contract_is_parked_and_counted(contracts: Cont
     assert topic == "emr.notes.v1.dlt" and json.loads(value) == bad
     assert headers["valxel-field"] == b"clinic_id" and headers["valxel-rule"] == b"required"
     assert count("emr.notes", "applied") == applied + 1 and count("emr.notes", "parked") == parked + 1
+    assert summary_line() == 'valxel.datasets {"emr.notes":{"applied":1,"parked":1}}'
+    assert summary_line() is None
 
 
 def test_the_worker_hands_its_producer_to_every_runner(contracts: Contracts) -> None:

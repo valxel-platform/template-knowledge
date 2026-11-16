@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import Config, Source
-from .contracts import EVENTS, ContractError, Contracts
+from .contracts import ContractError, Contracts, count, summary_line
 from .models import Embedder
 from .passages import from_record
 from .store import IndexVersion, Store, live_versions
@@ -251,11 +251,11 @@ class EventsRunner(threading.Thread):
             try:
                 event = json.loads(msg.value())
                 self.ingestor.handle_event(self.source, event, self.version)
-                EVENTS.labels(self.dataset, "applied").inc()
+                count(self.dataset, "applied")
             except ContractError as exc:  # breaks its contract: park it, naming the field, never its value
                 self.park(msg, exc)
             except (ValueError, KeyError, TypeError) as exc:  # a record that can't be read: skip it
-                EVENTS.labels(self.dataset, "skipped").inc()
+                count(self.dataset, "skipped")
                 log.error(
                     "%s: skipped an unreadable event at offset %s (%s)",
                     self.source.name,
@@ -294,9 +294,9 @@ class EventsRunner(threading.Thread):
             ],
         )
         self.producer.flush(10)
-        EVENTS.labels(self.dataset, "parked").inc()
+        count(self.dataset, "parked")
         log.error(
-            "knowledge.event_parked dataset=%s field=%s rule=%s offset=%s",
+            "knowledge.event_parked dataset=%s field=%s breaks the data contract (%s) offset=%s",
             exc.dataset,
             exc.field,
             exc.rule,
@@ -431,12 +431,18 @@ class Worker:
                 check_topics(self.ingestor.cfg, self.ingestor.store, self.describe)
             except Exception:
                 log.exception("Ingestion: couldn't check the topics' cleanup policies")
+            beat = 0
             while not self.stop.is_set():
                 try:
                     self.refresh()
                     self.report_lag()
                 except Exception:
                     log.exception("Ingestion: couldn't read the index versions; trying again")
+                beat += 1
+                if beat % 2 == 0:  # once a minute: the line the platform reconciles in staging
+                    line = summary_line()
+                    if line:
+                        log.info(line)
                 self.stop.wait(30)
 
         t = threading.Thread(target=loop, daemon=True, name="ingest-supervisor")
