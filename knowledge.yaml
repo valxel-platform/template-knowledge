@@ -1,7 +1,7 @@
 # What this product's agents may search, where it comes from, and who may see it (config.py has
 # the full reference). Coder agents write this from the product's data model during the build, and
 # people approve it with the code at G5. The example is an EMR: notes and messages arrive as
-# events, clinic documents are read from their store, and scanned forms are named but not indexed.
+# events on compacted topics (decided at G4: each event carries the whole record, keyed by its id), clinic documents are read from their store, and scanned forms are named but not indexed.
 index:
   # Decided at the architecture gate (G4): a provider under the BAA through the gateway, or the
   # product's self-hosted model. Changing it means `knowledge-admin rebuild`.
@@ -12,7 +12,7 @@ index:
 sources:
   - name: notes
     title: Clinical notes
-    from: { events: { topic: emr.notes.v1 } }
+    from: { events: { topic: emr.notes.v1, compacted: true } }
     id: note_id
     text: [body]
     heading: title
@@ -25,7 +25,7 @@ sources:
 
   - name: messages
     title: Care-team messages
-    from: { events: { topic: emr.messages.v1 } }
+    from: { events: { topic: emr.messages.v1, compacted: true } }
     id: message_id
     text: [body]
     heading: subject

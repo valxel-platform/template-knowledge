@@ -61,8 +61,17 @@ beside the active one, from every source. Then run the retrieval evals against i
 removes a retired version. `knowledge-admin status` shows each version and each source's lag. Run
 these as the database owner; `knowledge-admin migrate` creates the schema.
 
-An events topic has to keep every record to rebuild from (a compacted topic), or the source should
-be a scan.
+A rebuild replays each events source's topic from its start, so the topic must keep every record.
+At G4 the architecture agent decides, per source and with people approving, between a compacted
+topic and a scan. A compacted topic means each event carries the whole record keyed by its id, a
+deletion is a `.deleted` event, and Kafka keeps each record's latest event. The provider that
+publishes the topic is told to keep it that way during the build. `knowledge.yaml` marks it
+`compacted: true` and refuses an events source without it.
+
+At start, the worker reads each topic's `cleanup.policy`. A topic that isn't compacted logs
+`knowledge.topic_not_compacted`, `list_sources` says a rebuild would miss older records, and
+`knowledge-admin rebuild` refuses until it's fixed (or `--force`). A source that can't meet this
+should be a scan.
 
 ## Evals
 

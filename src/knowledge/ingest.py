@@ -139,6 +139,48 @@ class Ingestor:
         return changed, len(gone)
 
 
+def topic_key(source: str) -> str:
+    return f"{source}@topic"
+
+
+def check_topics(cfg: Config, store: Store, describe: Callable[[str], str]) -> list[str]:
+    """Each compacted events source's topic really is compacted (`describe` returns the topic's
+    cleanup.policy). Records the answer for list_sources and knowledge-admin, and logs
+    knowledge.topic_not_compacted for each that isn't. Returns those sources."""
+    wrong = []
+    for s in cfg.sources:
+        if s.kind != "events":
+            continue
+        topic = str(s.options["topic"])
+        try:
+            policy = describe(topic)
+        except Exception as exc:  # noqa: BLE001  (an unreachable broker mustn't stop ingestion)
+            log.warning("%s: couldn't read %s's cleanup.policy (%s)", s.name, topic, type(exc).__name__)
+            continue
+        ok = "compact" in policy
+        store.set_source_state(topic_key(s.name), topic=topic, cleanup_policy=policy, compacted=ok)
+        if not ok:
+            wrong.append(s.name)
+            log.warning(
+                "knowledge.topic_not_compacted %s reads %s, whose cleanup.policy is %s: a rebuild would miss "
+                "records older than its retention",
+                s.name,
+                topic,
+                policy,
+            )
+    return wrong
+
+
+def not_compacted(cfg: Config, store: Store) -> list[str]:
+    """Sources whose topic was found not compacted (by the worker's last check)."""
+    states = store.source_states()
+    return [
+        s.name
+        for s in cfg.sources
+        if s.kind == "events" and states.get(topic_key(s.name), {}).get("compacted") is False
+    ]
+
+
 def lag_seconds(cfg: Config, store: Store, version: int, now: float) -> dict[str, float | None]:
     """How far each source's index trails the product, in seconds (None: never ingested)."""
     states = store.source_states()
@@ -293,6 +335,7 @@ class Worker:
     ) -> None:
         self.ingestor, self.name, self.kafka, self.rows = ingestor, name, kafka, rows
         self.consumer_factory = consumer_factory or _kafka_consumer
+        self.describe: Callable[[str], str] = lambda topic: _cleanup_policy(kafka, topic)
         self.runners: dict[tuple[str, int], EventsRunner | ScanRunner] = {}
         self.stop = threading.Event()
         self._warned: dict[str, float] = {}
@@ -342,6 +385,10 @@ class Worker:
 
     def start(self) -> threading.Thread:
         def loop() -> None:
+            try:
+                check_topics(self.ingestor.cfg, self.ingestor.store, self.describe)
+            except Exception:
+                log.exception("Ingestion: couldn't check the topics' cleanup policies")
             while not self.stop.is_set():
                 try:
                     self.refresh()
@@ -353,6 +400,15 @@ class Worker:
         t = threading.Thread(target=loop, daemon=True, name="ingest-supervisor")
         t.start()
         return t
+
+
+def _cleanup_policy(kafka: dict[str, Any], topic: str) -> str:
+    from confluent_kafka.admin import AdminClient, ConfigResource  # type: ignore[attr-defined]
+
+    admin = AdminClient(kafka)
+    res = ConfigResource(ConfigResource.Type.TOPIC, topic)
+    configs = admin.describe_configs([res])[res].result(timeout=15)
+    return str(configs["cleanup.policy"].value)
 
 
 def _kafka_consumer(conf: dict[str, Any]) -> Any:

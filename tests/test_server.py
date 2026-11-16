@@ -119,3 +119,11 @@ def test_rate_limit_per_caller(live: Live) -> None:
     results = [live.call("south", "list_sources", {}) for _ in range(7)]
     assert any(r.is_error and "Rate limit" in r.content[0].text for r in results)
     assert not live.call("nurse", "list_sources", {}).is_error
+
+
+def test_list_sources_says_when_a_topic_isnt_compacted(live: Live) -> None:
+    live.store.set_source_state(
+        "messages@topic", topic="emr.messages.v1", cleanup_policy="delete", compacted=False
+    )
+    sources = {s["name"]: s for s in result(live.call("nurse", "list_sources", {}))["sources"]}
+    assert "isn't compacted" in sources["messages"]["note"] and sources["notes"]["note"] == ""
