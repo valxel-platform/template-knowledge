@@ -1,6 +1,8 @@
 # The template conformance suite (.github/scripts/conformance.py, managed by the platform): the built
 # image does what every knowledge repo must. A search is made with a token like an agent's; the
 # embeddings come from the suite's stand-in gateway, and passages from the in-memory store.
+image: "ci"  # the tag CI builds
+command: "uv run knowledge-server"  # conformance.py local: the app as a process
 port: 8080
 audience: http://127.0.0.1:8080/mcp
 env:
