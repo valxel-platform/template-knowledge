@@ -24,6 +24,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
+from . import flags
 from .audit import Auditor, make_sink
 from .config import Config
 from .ingest import LAG_ALERT_S, lag_seconds, not_compacted
@@ -56,6 +57,15 @@ class SearchResult(BaseModel):
     notes: list[str] = Field(
         default_factory=list, description="What this search couldn't cover, if anything."
     )
+    # The template's example feature, behind its flag (example_flag below): off, it stays empty.
+    sources_used: list[str] | None = Field(default=None, description="The sources the passages came from")
+
+
+def example_flag(settings: Settings) -> str:
+    """The example feature's flag. It shows the pattern every feature follows: the tool gives the
+    feature a flag in the product's Flipt (on in dev and staging, off in production until it's
+    released) and the new behaviour reads it. Replace it with your first feature's own."""
+    return f"{settings.product or 'example'}.example.sources-used"
 
 
 class DocumentOut(BaseModel):
@@ -211,6 +221,10 @@ def build_server(
         except ModelUnavailable as exc:
             raise ToolError(f"Search is unavailable right now ({exc}). Try again shortly.") from exc
         _, lag = lags()
+        tok = caller()
+        used = None
+        if flags.enabled(example_flag(settings), user=tok.subject or tok.client_id):  # off: today's
+            used = sorted({h.passage.source_id.split(":", 1)[0] for h in hits})
         return SearchResult(
             passages=[
                 PassageOut(
@@ -227,6 +241,7 @@ def build_server(
             ],
             index_version=v.version,
             notes=_notes(cfg, lag, tuple(sources)),
+            sources_used=used,
         )
 
     @server.tool(annotations=READ)
