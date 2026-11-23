@@ -127,3 +127,23 @@ def test_list_sources_says_when_a_topic_isnt_compacted(live: Live) -> None:
     )
     sources = {s["name"]: s for s in result(live.call("nurse", "list_sources", {}))["sources"]}
     assert "isn't compacted" in sources["messages"]["note"] and sources["notes"]["note"] == ""
+
+
+def test_the_example_feature_is_behind_its_flag(live: Live) -> None:
+    """The pattern every feature follows: its new behaviour reads its flag, and off is today's."""
+    from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
+
+    from knowledge import flags
+    from knowledge.server import example_flag
+    from knowledge.settings import Settings
+
+    assert example_flag(Settings(product="emr")) == "emr.example.sources-used"
+    assert result(live.call("nurse", "search", {"question": "amlodipine"}))["sources_used"] is None
+    on = InMemoryFlag("on", {"on": True, "off": False})
+    keys = {"example.example.sources-used": on}  # the test server names no product
+    flags.use_provider(InMemoryProvider(keys))
+    try:
+        used = result(live.call("nurse", "search", {"question": "amlodipine"}))["sources_used"]
+        assert used and "notes" in used
+    finally:
+        flags.use_provider(InMemoryProvider({}))
