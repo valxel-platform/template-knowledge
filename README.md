@@ -118,6 +118,13 @@ The server is an OAuth 2.0 resource server (MCP authorization spec):
 - Agents call with the person's delegated token (token exchange), so searches see what that person
   may see. A client-credentials token sees only passages open to its tenant.
 
+## Ports
+
+The API is on 8080, with `/healthz` and `/readyz` for Kubernetes' probes. `/metrics` is on the
+management port, `MANAGEMENT_PORT` (8081), as Spring's actuator is in the Java templates. The
+platform's metrics collector scrapes it there, and the product's mesh lets the collector reach that
+port and no other. The API port serves no metrics.
+
 ## Run it
 
 ```
