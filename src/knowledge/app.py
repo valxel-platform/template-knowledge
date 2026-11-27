@@ -14,7 +14,7 @@ from prometheus_client.core import GaugeMetricFamily
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import cohorts, errors, events, flags, management, telemetry, usage
+from . import cohorts, errors, events, flags, http_metrics, management, telemetry, usage
 from .config import Config, load
 from .contracts import Contracts
 from .ingest import Ingestor, Worker, lag_seconds
@@ -179,7 +179,12 @@ def create_app(
     cohorts.start_reporting()
     events.start_reporting()
     return OpenTelemetryMiddleware(
-        errors.TraceResponseMiddleware(cohorts.CohortMiddleware(usage.UsageMiddleware(app))),
+        # Requests, errors and latency per route, on the management port (http_metrics.py).
+        errors.TraceResponseMiddleware(
+            cohorts.CohortMiddleware(
+                usage.UsageMiddleware(http_metrics.HttpMetrics(app, registry=usage.registry))
+            )
+        ),
         excluded_urls="healthz,metrics",
     )
 
