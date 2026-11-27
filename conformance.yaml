@@ -3,6 +3,8 @@
 # embeddings come from the suite's stand-in gateway, and passages from the in-memory store.
 image: "ci"  # the tag CI builds
 command: "uv run knowledge-server"  # conformance.py local: the app as a process
+# /metrics is on the management port (MANAGEMENT_PORT, 8081), apart from the API.
+metrics: http://127.0.0.1:8081/metrics
 port: 8080
 audience: http://127.0.0.1:8080/mcp
 env:
